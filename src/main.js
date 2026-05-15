@@ -1,437 +1,418 @@
-/**
- * ClawMail - Disposable Email Service
- * Modern temporary email with auto-categorization
- */
+import './style.css'
 
-import './style.css';
+const API_HOST = import.meta.env.VITE_API_HOST || 'http://localhost:8787'
+const API_KEY = import.meta.env.VITE_API_KEY || 'dev-key'
+const DEFAULT_DOMAIN = import.meta.env.VITE_MAIL_DOMAIN || 'claw.dev'
+const POLL_INTERVAL = parseInt(import.meta.env.VITE_POLL_MS || '8000')
 
-// Config from environment
-const cfg = {
-  apiHost: import.meta.env.VITE_API_HOST || '',
-  apiKey: import.meta.env.VITE_API_KEY || '',
-  domain: import.meta.env.VITE_MAIL_DOMAIN || 'example.com',
-  pollMs: parseInt(import.meta.env.VITE_POLL_MS) || 8000,
-  theme: import.meta.env.VITE_THEME || 'midnight',
-};
-
-// State
 let state = {
   email: null,
-  messages: [],
+  domain: DEFAULT_DOMAIN,
   domains: [],
-  pollTimer: null,
-};
-
-// DOM refs
-const el = {
-  sectionGenerator: document.getElementById('sectionGenerator'),
-  sectionActive: document.getElementById('sectionActive'),
-  sectionInbox: document.getElementById('sectionInbox'),
-  inputPrefix: document.getElementById('inputPrefix'),
-  selectDomain: document.getElementById('selectDomain'),
-  btnCreate: document.getElementById('btnCreate'),
-  displayEmail: document.getElementById('displayEmail'),
-  btnCopy: document.getElementById('btnCopy'),
-  btnDestroy: document.getElementById('btnDestroy'),
-  listMessages: document.getElementById('listMessages'),
-  btnReload: document.getElementById('btnReload'),
-  btnExtractOTP: document.getElementById('btnExtractOTP'),
-  otpResult: document.getElementById('otpResult'),
-  otpCode: document.getElementById('otpCode'),
-  btnCopyOTP: document.getElementById('btnCopyOTP'),
-  modalMessage: document.getElementById('modalMessage'),
-  btnCloseModal: document.getElementById('btnCloseModal'),
-  modalSubject: document.getElementById('modalSubject'),
-  modalMeta: document.getElementById('modalMeta'),
-  modalBody: document.getElementById('modalBody'),
-  viewText: document.getElementById('viewText'),
-  viewHTML: document.getElementById('viewHTML'),
-  toast: document.getElementById('toast'),
-  btnTheme: document.getElementById('btnTheme'),
-};
-
-// Init
-function init() {
-  applyTheme(cfg.theme);
-  loadFromStorage();
-  fetchDomains();
-  bindEvents();
+  inbox: [],
+  selectedEmail: null,
+  polling: null,
+  theme: localStorage.getItem('theme') || 'dark'
 }
 
-// Theme
-function applyTheme(theme) {
-  document.body.setAttribute('data-theme', theme);
-  cfg.theme = theme;
-}
-
-function toggleTheme() {
-  const next = cfg.theme === 'midnight' ? 'paper' : 'midnight';
-  applyTheme(next);
-  showToast(`Theme: ${next}`);
-}
-
-// Storage
-function loadFromStorage() {
-  const stored = localStorage.getItem('clawmail_session');
-  if (stored) {
-    try {
-      state.email = JSON.parse(stored);
-      showActiveEmail();
-      startPolling();
-    } catch (e) {
-      localStorage.removeItem('clawmail_session');
-    }
-  }
-}
-
-function saveToStorage() {
-  if (state.email) {
-    localStorage.setItem('clawmail_session', JSON.stringify(state.email));
-  } else {
-    localStorage.removeItem('clawmail_session');
-  }
-}
-
-// Events
-function bindEvents() {
-  el.btnCreate.addEventListener('click', createEmail);
-  el.btnCopy.addEventListener('click', () => copyText(state.email?.address));
-  el.btnDestroy.addEventListener('click', destroyEmail);
-  el.btnReload.addEventListener('click', fetchInbox);
-  el.btnExtractOTP.addEventListener('click', extractOTP);
-  el.btnCopyOTP.addEventListener('click', () => copyText(el.otpCode.textContent));
-  el.btnCloseModal.addEventListener('click', closeModal);
-  el.btnTheme.addEventListener('click', toggleTheme);
-  
-  el.modalMessage.addEventListener('click', (e) => {
-    if (e.target === el.modalMessage) closeModal();
-  });
-
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => switchTab(btn.dataset.view));
-  });
-
-  el.inputPrefix.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') createEmail();
-  });
-}
-
-// API helper
 async function apiCall(endpoint, options = {}) {
-  const url = `${cfg.apiHost}${endpoint}`;
+  const url = `${API_HOST}${endpoint}`
   const headers = {
+    'Authorization': `Bearer ${API_KEY}`,
     'Content-Type': 'application/json',
-    ...(cfg.apiKey && { 'Authorization': `Bearer ${cfg.apiKey}` }),
-  };
+    ...options.headers
+  }
+  
+  const response = await fetch(url, { ...options, headers })
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`)
+  }
+  return response.json()
+}
 
+async function loadDomains() {
   try {
-    const res = await fetch(url, { ...options, headers });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
+    const data = await apiCall('/domains')
+    state.domains = data.domains || []
+    if (state.domains.length > 0 && !state.domains.includes(state.domain)) {
+      state.domain = state.domains[0]
+    }
+    renderDomainSelector()
   } catch (err) {
-    console.error('API error:', err);
-    showToast(`Error: ${err.message}`, 'error');
-    throw err;
+    console.error('Failed to load domains:', err)
+    state.domains = [DEFAULT_DOMAIN]
   }
 }
 
-// Domains
-async function fetchDomains() {
-  try {
-    const data = await apiCall('/domains');
-    state.domains = data.domains || [cfg.domain];
-    renderDomains();
-  } catch (err) {
-    state.domains = [cfg.domain];
-    renderDomains();
-  }
-}
-
-function renderDomains() {
-  el.selectDomain.innerHTML = state.domains
-    .map(d => `<option value="${d}">${d}</option>`)
-    .join('');
-}
-
-// Create email
-async function createEmail() {
-  const prefix = el.inputPrefix.value.trim() || randomPrefix();
-  const domain = el.selectDomain.value || cfg.domain;
-  const address = `${prefix}@${domain}`;
-
-  el.btnCreate.disabled = true;
-  el.btnCreate.textContent = 'Creating...';
-
+async function generateEmail() {
+  const username = document.getElementById('emailUsername').value.trim() || randomUsername()
+  const email = `${username}@${state.domain}`
+  
   try {
     const data = await apiCall('/generate', {
       method: 'POST',
-      body: JSON.stringify({ address }),
-    });
-
-    state.email = {
-      id: data.id || address,
-      address: data.address || address,
-      createdAt: Date.now(),
-    };
-
-    saveToStorage();
-    showActiveEmail();
-    startPolling();
-    showToast('Email created!');
+      body: JSON.stringify({ email })
+    })
+    
+    state.email = data.email
+    state.inbox = []
+    
+    document.getElementById('emailDisplay').value = state.email
+    document.getElementById('inboxSection').classList.remove('hidden')
+    
+    startPolling()
+    showNotification('Email generated!', 'success')
   } catch (err) {
-    showToast('Failed to create email', 'error');
-  } finally {
-    el.btnCreate.disabled = false;
-    el.btnCreate.innerHTML = `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-      </svg>
-      Create Address
-    `;
+    showNotification('Failed to generate email', 'error')
+    console.error(err)
   }
 }
 
-function randomPrefix() {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let result = '';
-  for (let i = 0; i < 8; i++) {
-    result += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return result;
-}
-
-// Show active email
-function showActiveEmail() {
-  el.sectionGenerator.classList.add('hidden');
-  el.sectionActive.classList.remove('hidden');
-  el.sectionInbox.classList.remove('hidden');
-  el.displayEmail.textContent = state.email.address;
-}
-
-// Destroy email
-async function destroyEmail() {
-  if (!confirm('Delete this email address?')) return;
-
+async function fetchInbox() {
+  if (!state.email) return
+  
   try {
-    await apiCall(`/email/${state.email.id}`, { method: 'DELETE' });
+    const data = await apiCall(`/inbox/${encodeURIComponent(state.email)}`)
+    state.inbox = data.messages || []
+    renderInbox()
   } catch (err) {
-    // Continue even if API fails
+    console.error('Failed to fetch inbox:', err)
   }
-
-  stopPolling();
-  state.email = null;
-  state.messages = [];
-  saveToStorage();
-
-  el.sectionGenerator.classList.remove('hidden');
-  el.sectionActive.classList.add('hidden');
-  el.sectionInbox.classList.add('hidden');
-  el.otpResult.classList.add('hidden');
-  el.inputPrefix.value = '';
-
-  showToast('Email deleted');
 }
 
-// Polling
 function startPolling() {
-  stopPolling();
-  fetchInbox();
-  state.pollTimer = setInterval(fetchInbox, cfg.pollMs);
+  if (state.polling) clearInterval(state.polling)
+  
+  fetchInbox()
+  state.polling = setInterval(fetchInbox, POLL_INTERVAL)
 }
 
 function stopPolling() {
-  if (state.pollTimer) {
-    clearInterval(state.pollTimer);
-    state.pollTimer = null;
+  if (state.polling) {
+    clearInterval(state.polling)
+    state.polling = null
   }
 }
 
-// Fetch inbox
-async function fetchInbox() {
-  if (!state.email) return;
+function randomUsername() {
+  const adjectives = ['swift', 'bright', 'cool', 'quick', 'smart', 'bold', 'calm', 'wise']
+  const nouns = ['fox', 'wolf', 'hawk', 'lion', 'bear', 'eagle', 'tiger', 'shark']
+  const adj = adjectives[Math.floor(Math.random() * adjectives.length)]
+  const noun = nouns[Math.floor(Math.random() * nouns.length)]
+  const num = Math.floor(Math.random() * 999)
+  return `${adj}${noun}${num}`
+}
 
+function copyEmail() {
+  const input = document.getElementById('emailDisplay')
+  input.select()
+  document.execCommand('copy')
+  showNotification('Email copied!', 'success')
+}
+
+function toggleTheme() {
+  state.theme = state.theme === 'dark' ? 'light' : 'dark'
+  localStorage.setItem('theme', state.theme)
+  document.documentElement.setAttribute('data-theme', state.theme)
+  
+  const btn = document.getElementById('themeToggle')
+  btn.textContent = state.theme === 'dark' ? '☀️ Light' : '🌙 Dark'
+}
+
+function selectDomain(domain) {
+  state.domain = domain
+  renderDomainSelector()
+}
+
+async function openEmail(messageId) {
   try {
-    const data = await apiCall(`/inbox/${state.email.id}`);
-    state.messages = data.messages || [];
-    renderMessages();
+    const data = await apiCall(`/message/${encodeURIComponent(state.email)}/${messageId}`)
+    state.selectedEmail = data.message
+    renderEmailModal()
   } catch (err) {
-    console.error('Fetch inbox failed:', err);
+    showNotification('Failed to load email', 'error')
+    console.error(err)
   }
 }
 
-// Render messages
-function renderMessages() {
-  if (state.messages.length === 0) {
-    el.listMessages.innerHTML = '<div class="empty-state">No messages yet</div>';
-    return;
-  }
+function closeEmailModal() {
+  state.selectedEmail = null
+  document.getElementById('emailModal').remove()
+}
 
-  el.listMessages.innerHTML = state.messages
-    .map(msg => {
-      const category = detectCategory(msg);
-      const badge = category ? `<span class="message-badge badge-${category}">${category}</span>` : '';
-      const time = formatTime(msg.timestamp || msg.date);
-
-      return `
-        <div class="message-item" data-id="${msg.id}">
-          <div class="message-header">
-            <div class="message-subject">${escapeHtml(msg.subject || '(No subject)')}</div>
-            ${badge}
-          </div>
-          <div class="message-from">${escapeHtml(msg.from || 'Unknown')}</div>
-          <div class="message-time">${time}</div>
-        </div>
-      `;
+async function deleteEmail(messageId) {
+  try {
+    await apiCall(`/delete/${encodeURIComponent(state.email)}/${messageId}`, {
+      method: 'DELETE'
     })
-    .join('');
-
-  // Bind click events
-  el.listMessages.querySelectorAll('.message-item').forEach(item => {
-    item.addEventListener('click', () => openMessage(item.dataset.id));
-  });
-}
-
-// Detect category
-function detectCategory(msg) {
-  const text = `${msg.subject} ${msg.text || ''}`.toLowerCase();
-  
-  if (/\b\d{4,8}\b/.test(text) && /(code|otp|verify|verification|confirm)/i.test(text)) {
-    return 'otp';
-  }
-  if (/(unsubscribe|promotion|offer|deal|discount)/i.test(text)) {
-    return 'promo';
-  }
-  if (/(spam|phishing|suspicious)/i.test(text)) {
-    return 'spam';
-  }
-  return null;
-}
-
-// Open message
-async function openMessage(id) {
-  const msg = state.messages.find(m => m.id === id);
-  if (!msg) return;
-
-  try {
-    const data = await apiCall(`/message/${id}`);
-    showMessageModal(data);
+    state.inbox = state.inbox.filter(m => m.id !== messageId)
+    renderInbox()
+    showNotification('Email deleted', 'success')
   } catch (err) {
-    showMessageModal(msg);
+    showNotification('Failed to delete email', 'error')
+    console.error(err)
   }
 }
 
-// Show message modal
-function showMessageModal(msg) {
-  el.modalSubject.textContent = msg.subject || '(No subject)';
-  el.modalMeta.textContent = `From: ${msg.from || 'Unknown'} • ${formatTime(msg.timestamp || msg.date)}`;
+function showNotification(message, type = 'info') {
+  const existing = document.querySelector('.notification')
+  if (existing) existing.remove()
   
-  el.viewText.innerHTML = `<pre>${escapeHtml(msg.text || msg.textBody || 'No text content')}</pre>`;
+  const notif = document.createElement('div')
+  notif.className = `notification notification-${type}`
+  notif.textContent = message
+  notif.style.cssText = `
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    background: ${type === 'success' ? 'var(--success)' : 'var(--error)'};
+    color: white;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-weight: 500;
+    z-index: 1000;
+    animation: slideIn 0.3s ease;
+  `
   
-  if (msg.html || msg.htmlBody) {
-    const blob = new Blob([msg.html || msg.htmlBody], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    el.viewHTML.innerHTML = `<iframe src="${url}" sandbox="allow-same-origin"></iframe>`;
-  } else {
-    el.viewHTML.innerHTML = '<div class="empty-state">No HTML content</div>';
+  document.body.appendChild(notif)
+  setTimeout(() => notif.remove(), 3000)
+}
+
+function renderDomainSelector() {
+  const container = document.getElementById('domainSelector')
+  container.innerHTML = state.domains.map(domain => `
+    <button 
+      class="domain-chip ${domain === state.domain ? 'active' : ''}"
+      onclick="window.selectDomain('${domain}')"
+    >
+      @${domain}
+    </button>
+  `).join('')
+}
+
+function renderInbox() {
+  const container = document.getElementById('inboxList')
+  const stats = document.getElementById('inboxStats')
+  
+  stats.textContent = `${state.inbox.length} message${state.inbox.length !== 1 ? 's' : ''}`
+  
+  if (state.inbox.length === 0) {
+    container.innerHTML = `
+      <div class="inbox-empty">
+        <div class="inbox-empty-icon">📭</div>
+        <p>No messages yet. Your inbox is empty.</p>
+      </div>
+    `
+    return
   }
-
-  el.modalMessage.classList.remove('hidden');
-}
-
-// Close modal
-function closeModal() {
-  el.modalMessage.classList.add('hidden');
-}
-
-// Switch tab
-function switchTab(view) {
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.view === view);
-  });
-  document.querySelectorAll('.view-content').forEach(content => {
-    content.classList.toggle('active', content.id === `view${view.charAt(0).toUpperCase() + view.slice(1)}`);
-  });
-}
-
-// Extract OTP
-async function extractOTP() {
-  if (state.messages.length === 0) {
-    showToast('No messages to extract from', 'error');
-    return;
-  }
-
-  try {
-    const latestMsg = state.messages[0];
-    const data = await apiCall(`/code/${latestMsg.id}`);
-    
-    if (data.code) {
-      el.otpCode.textContent = data.code;
-      el.otpResult.classList.remove('hidden');
-      showToast('OTP extracted!');
-    } else {
-      showToast('No OTP found', 'error');
-    }
-  } catch (err) {
-    // Fallback: regex extraction
-    const text = state.messages[0].text || state.messages[0].subject || '';
-    const match = text.match(/\b(\d{4,8})\b/);
-    
-    if (match) {
-      el.otpCode.textContent = match[1];
-      el.otpResult.classList.remove('hidden');
-      showToast('OTP extracted (local)');
-    } else {
-      showToast('No OTP found', 'error');
-    }
-  }
-}
-
-// Copy text
-function copyText(text) {
-  if (!text) return;
   
-  navigator.clipboard.writeText(text).then(() => {
-    showToast('Copied!');
-  }).catch(() => {
-    showToast('Copy failed', 'error');
-  });
+  container.innerHTML = state.inbox.map(msg => `
+    <div class="email-item ${msg.read ? '' : 'unread'}" onclick="window.openEmail('${msg.id}')">
+      <div class="email-header">
+        <div class="email-from">${escapeHtml(msg.from)}</div>
+        <div class="email-time">${formatTime(msg.date)}</div>
+      </div>
+      <div class="email-subject">${escapeHtml(msg.subject)}</div>
+      <div class="email-preview">${escapeHtml(msg.preview || msg.text?.substring(0, 100) || '')}</div>
+    </div>
+  `).join('')
 }
 
-// Toast
-function showToast(message, type = 'info') {
-  el.toast.textContent = message;
-  el.toast.classList.remove('hidden');
+function renderEmailModal() {
+  const msg = state.selectedEmail
+  if (!msg) return
   
-  setTimeout(() => {
-    el.toast.classList.add('hidden');
-  }, 3000);
+  const modal = document.createElement('div')
+  modal.id = 'emailModal'
+  modal.className = 'modal-overlay'
+  modal.innerHTML = `
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">Email Details</div>
+        <button class="modal-close" onclick="window.closeEmailModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="email-meta">
+          <div class="email-meta-row">
+            <div class="email-meta-label">From:</div>
+            <div class="email-meta-value">${escapeHtml(msg.from)}</div>
+          </div>
+          <div class="email-meta-row">
+            <div class="email-meta-label">To:</div>
+            <div class="email-meta-value">${escapeHtml(msg.to)}</div>
+          </div>
+          <div class="email-meta-row">
+            <div class="email-meta-label">Subject:</div>
+            <div class="email-meta-value">${escapeHtml(msg.subject)}</div>
+          </div>
+          <div class="email-meta-row">
+            <div class="email-meta-label">Date:</div>
+            <div class="email-meta-value">${new Date(msg.date).toLocaleString()}</div>
+          </div>
+        </div>
+        <div class="email-body">
+          ${msg.html ? msg.html : `<pre>${escapeHtml(msg.text || '')}</pre>`}
+        </div>
+      </div>
+    </div>
+  `
+  
+  document.body.appendChild(modal)
+  
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeEmailModal()
+  })
 }
 
-// Utilities
+function formatTime(dateStr) {
+  const date = new Date(dateStr)
+  const now = new Date()
+  const diff = now - date
+  
+  if (diff < 60000) return 'Just now'
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
+  return date.toLocaleDateString()
+}
+
 function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  const div = document.createElement('div')
+  div.textContent = text
+  return div.innerHTML
 }
 
-function formatTime(timestamp) {
-  if (!timestamp) return 'Unknown time';
+function initApp() {
+  document.documentElement.setAttribute('data-theme', state.theme)
   
-  const date = new Date(timestamp);
-  const now = new Date();
-  const diff = now - date;
-  
-  if (diff < 60000) return 'Just now';
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
-  
-  return date.toLocaleDateString('en-US', { 
-    month: 'short', 
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
+  document.getElementById('app').innerHTML = `
+    <nav class="navbar">
+      <div class="nav-container">
+        <a href="#" class="logo">
+          <div class="logo-icon">🐾</div>
+          <span>ClawMail</span>
+        </a>
+        <div class="nav-actions">
+          <button class="theme-toggle" id="themeToggle" onclick="window.toggleTheme()">
+            ${state.theme === 'dark' ? '☀️ Light' : '🌙 Dark'}
+          </button>
+        </div>
+      </div>
+    </nav>
+
+    <section class="hero">
+      <div class="container">
+        <div class="hero-badge">
+          <span class="badge-dot"></span>
+          Temporary Email Service
+        </div>
+        <h1 class="hero-title">
+          Disposable Email,<br>
+          <span class="text-gradient">Instantly.</span>
+        </h1>
+        <p class="hero-desc">
+          Generate secure temporary emails in seconds. No signup, no tracking, completely anonymous.
+        </p>
+
+        <div class="generate-box">
+          <div class="email-input-wrap">
+            <div class="email-field">
+              <input 
+                type="text" 
+                class="email-display" 
+                id="emailDisplay" 
+                placeholder="your-email@claw.dev" 
+                readonly
+              >
+            </div>
+            <button class="btn" onclick="window.copyEmail()">📋 Copy</button>
+          </div>
+          
+          <div class="email-input-wrap">
+            <input 
+              type="text" 
+              class="email-display" 
+              id="emailUsername" 
+              placeholder="username (optional)"
+            >
+            <button class="btn" onclick="window.generateEmail()">🎲 Generate</button>
+          </div>
+
+          <div class="domain-selector" id="domainSelector"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="inbox-section container hidden" id="inboxSection">
+      <div class="inbox-header">
+        <h2 class="inbox-title">📬 Inbox</h2>
+        <div class="inbox-stats" id="inboxStats">0 messages</div>
+      </div>
+      <div class="inbox-list" id="inboxList">
+        <div class="inbox-empty">
+          <div class="inbox-empty-icon">📭</div>
+          <p>No messages yet. Your inbox is empty.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="features-section">
+      <div class="container">
+        <h2 class="section-title">Why ClawMail?</h2>
+        <div class="features-grid">
+          <div class="feature-card">
+            <div class="feature-icon">⚡</div>
+            <h3 class="feature-title">Instant Generation</h3>
+            <p class="feature-desc">Create temporary emails in seconds. No registration required.</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">🔒</div>
+            <h3 class="feature-title">Privacy First</h3>
+            <p class="feature-desc">Your data is never stored. Complete anonymity guaranteed.</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">🎯</div>
+            <h3 class="feature-title">Multiple Domains</h3>
+            <p class="feature-desc">Choose from multiple domains for your temporary email.</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">🔄</div>
+            <h3 class="feature-title">Auto Refresh</h3>
+            <p class="feature-desc">Inbox updates automatically. Never miss an email.</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">📱</div>
+            <h3 class="feature-title">Mobile Friendly</h3>
+            <p class="feature-desc">Works perfectly on all devices. Responsive design.</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">🎨</div>
+            <h3 class="feature-title">Dark Mode</h3>
+            <p class="feature-desc">Easy on the eyes. Switch themes anytime.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <div class="container">
+        <p>ClawMail © 2026 — Temporary Email Service</p>
+      </div>
+    </footer>
+  `
+
+  setTimeout(() => {
+    document.getElementById('app-loader').classList.add('hide')
+  }, 500)
+
+  loadDomains()
 }
 
-// Start app
-init();
+window.generateEmail = generateEmail
+window.copyEmail = copyEmail
+window.toggleTheme = toggleTheme
+window.selectDomain = selectDomain
+window.openEmail = openEmail
+window.closeEmailModal = closeEmailModal
+window.deleteEmail = deleteEmail
+
+document.addEventListener('DOMContentLoaded', initApp)
