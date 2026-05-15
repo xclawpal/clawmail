@@ -210,10 +210,10 @@ function renderInbox() {
     <div class="email-item ${msg.read ? '' : 'unread'}" onclick="window.openEmail('${msg.id}')">
       <div class="email-header">
         <div class="email-from">${escapeHtml(msg.from)}</div>
-        <div class="email-time">${formatTime(msg.date)}</div>
+        <div class="email-time">${formatTime(msg.timestamp || msg.date)}</div>
       </div>
       <div class="email-subject">${escapeHtml(msg.subject)}</div>
-      <div class="email-preview">${escapeHtml(msg.preview || msg.text?.substring(0, 100) || '')}</div>
+      <div class="email-preview">${escapeHtml((msg.text || '').substring(0, 100))}</div>
     </div>
   `).join('')
 }
@@ -239,7 +239,7 @@ function renderEmailModal() {
           </div>
           <div class="email-meta-row">
             <div class="email-meta-label">To:</div>
-            <div class="email-meta-value">${escapeHtml(msg.to)}</div>
+            <div class="email-meta-value">${escapeHtml(msg.to || state.email)}</div>
           </div>
           <div class="email-meta-row">
             <div class="email-meta-label">Subject:</div>
@@ -247,7 +247,7 @@ function renderEmailModal() {
           </div>
           <div class="email-meta-row">
             <div class="email-meta-label">Date:</div>
-            <div class="email-meta-value">${new Date(msg.date).toLocaleString()}</div>
+            <div class="email-meta-value">${new Date(msg.timestamp || msg.date).toLocaleString()}</div>
           </div>
         </div>
         <div class="email-body">
