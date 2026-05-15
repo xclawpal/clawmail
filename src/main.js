@@ -54,7 +54,7 @@ async function generateEmail() {
       body: JSON.stringify({ email })
     })
     
-    state.email = data.email
+    state.email = data.address || data.email || email
     state.inbox = []
     
     document.getElementById('emailDisplay').value = state.email
